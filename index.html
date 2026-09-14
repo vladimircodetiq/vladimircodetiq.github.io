@@ -7,10 +7,18 @@
   the static host you are testing from (e.g. the vladimircodetiq.github.io repo, as
   index.html) -- it has no build step and no dependencies.
 
-  The handshake it implements is the host half of frontend/src/auth/hostToken.ts:
-      SPA  -> host: { type: "gsdb-host-ready" }
-      host -> SPA:  { type: "gsdb-host-token", token }
-  The host may push a fresh token at any time; the SPA swaps it in without reloading.
+  The handshake it implements is the host half of frontend/src/auth/hostToken.ts. Every
+  message is an envelope { ns: "gsdb", v: 1, type, payload }:
+
+      SPA  -> host: ready                 loaded, wants a token
+                    token-request {reason} what it holds is expiring -- send a fresh one
+                    auth-required {reason} asked, nobody answered; only you can fix it
+      host -> SPA:  token {token}          replaces whatever it holds, no reload
+                    token-unavailable      you cannot supply one right now
+
+  The host may push a fresh token at any time; the SPA swaps it in without reloading. A
+  token for a *different user* is not a renewal -- the SPA drops the previous user's
+  screens and starts over, which the "Push token" button lets you try.
 
   Getting a token to paste: open https://vibe.codetiq.io top-level, sign in, and copy the
   `token=` value off the Appsmith iframe request in DevTools -> Network (or the
@@ -104,8 +112,15 @@
     <div id="frame-wrap"></div>
 
     <script>
-      const READY = "gsdb-host-ready";
-      const TOKEN = "gsdb-host-token";
+      const NS = "gsdb";
+      const V = 1;
+      // SPA -> host
+      const READY = "ready";
+      const TOKEN_REQUEST = "token-request";
+      const AUTH_REQUIRED = "auth-required";
+      // host -> SPA
+      const TOKEN = "token";
+      const TOKEN_UNAVAILABLE = "token-unavailable";
 
       const $ = (id) => document.getElementById(id);
       const logEl = $("log");
@@ -143,20 +158,48 @@
 
       // Always targeted at the SPA's exact origin, never "*": this message carries the
       // access token, so it must not be readable by whatever else might occupy the frame.
+      function send(type, payload) {
+        if (!frame || !spaOrigin) return;
+        frame.contentWindow.postMessage({ ns: NS, v: V, type, payload }, spaOrigin);
+        log("-> " + type + " to " + spaOrigin);
+      }
+
       function push() {
-        if (!frame || !token || !spaOrigin) return;
-        frame.contentWindow.postMessage({ type: TOKEN, token }, spaOrigin);
-        log("-> " + TOKEN + " posted to " + spaOrigin);
+        if (!token) {
+          send(TOKEN_UNAVAILABLE, { reason: "no token pasted in the test host" });
+          return;
+        }
+        send(TOKEN, { token });
       }
 
       // Registered before the iframe is ever created, so the SPA's first ready ping (sent
       // at load, before React renders) cannot arrive with nobody listening.
       window.addEventListener("message", (e) => {
         if (!frame || e.source !== frame.contentWindow) return;
-        if (e.data && e.data.type === READY) {
+        const msg = e.data;
+        if (!msg || msg.ns !== NS || msg.v !== V) return;
+        const reason = (msg.payload && msg.payload.reason) || "";
+
+        if (msg.type === READY) {
           log("<- " + READY + " from " + e.origin);
           if (token) push();
           else log("   ...but no token pasted yet; paste one and press Push token", true);
+          return;
+        }
+        if (msg.type === TOKEN_REQUEST) {
+          // A real host would acquire a fresh token here (MSAL acquireTokenSilent) and
+          // send that. This one can only re-send whatever is in the textarea, so paste a
+          // fresh token first -- and watch for auth-required if you do not.
+          log("<- " + TOKEN_REQUEST + " (" + reason + ")");
+          token = $("token").value.trim();
+          if (token) log("   " + describeToken(token));
+          push();
+          return;
+        }
+        if (msg.type === AUTH_REQUIRED) {
+          // The SPA asked, nobody answered in time. It is now showing "your session has
+          // expired" and will not recover until a token arrives.
+          log("<- " + AUTH_REQUIRED + " (" + reason + ") -- the SPA is blocked", true);
         }
       });
 
