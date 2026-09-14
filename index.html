@@ -1,1 +1,198 @@
-<iframe src="middle.html" style="width:100%;height:90vh;border:0"></iframe>
+<!doctype html>
+<!--
+  Cross-site embed test host for the GS Data Backbone SPA.
+
+  Stands in for a client's application: a foreign top-level origin that frames
+  vibe.codetiq.io and hands it an Entra access token over postMessage. Copy this file to
+  the static host you are testing from (e.g. the vladimircodetiq.github.io repo, as
+  index.html) -- it has no build step and no dependencies.
+
+  The handshake it implements is the host half of frontend/src/auth/hostToken.ts:
+      SPA  -> host: { type: "gsdb-host-ready" }
+      host -> SPA:  { type: "gsdb-host-token", token }
+  The host may push a fresh token at any time; the SPA swaps it in without reloading.
+
+  Getting a token to paste: open https://vibe.codetiq.io top-level, sign in, and copy the
+  `token=` value off the Appsmith iframe request in DevTools -> Network (or the
+  `authorization: Bearer` header on any /apps call). They last ~60 minutes -- this page
+  shows the countdown so an expired one is obvious rather than looking like a bug.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GSDB embed host (test)</title>
+    <style>
+      :root { color-scheme: light; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: #f4f5f7;
+        color: #14181f;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+      header {
+        flex: none;
+        background: #fff;
+        border-bottom: 1px solid #e3e6ea;
+        padding: 12px 16px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: flex-start;
+      }
+      h1 { font-size: 13px; margin: 0 12px 0 0; align-self: center; white-space: nowrap; }
+      textarea {
+        flex: 1 1 340px;
+        min-width: 240px;
+        height: 60px;
+        font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+        padding: 7px 9px;
+        border: 1px solid #d5d9df;
+        border-radius: 6px;
+        resize: vertical;
+      }
+      input[type="url"] {
+        flex: 0 1 260px;
+        font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+        padding: 7px 9px;
+        border: 1px solid #d5d9df;
+        border-radius: 6px;
+      }
+      .controls { display: flex; flex-direction: column; gap: 6px; }
+      button {
+        font: 600 12.5px inherit;
+        padding: 7px 13px;
+        border-radius: 6px;
+        border: 1px solid transparent;
+        background: #2d6cdf;
+        color: #fff;
+        cursor: pointer;
+      }
+      button.secondary { background: #fff; color: #2d3642; border-color: #d5d9df; }
+      button:disabled { opacity: 0.5; cursor: default; }
+      #log {
+        flex: 0 0 auto;
+        max-height: 96px;
+        overflow: auto;
+        margin: 0;
+        padding: 8px 16px;
+        background: #10141b;
+        color: #b9c4d2;
+        font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        white-space: pre-wrap;
+      }
+      #log .warn { color: #ffcf6b; }
+      #frame-wrap { flex: 1; min-height: 0; }
+      iframe { width: 100%; height: 100%; border: 0; background: #fff; display: block; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Embed host (test)</h1>
+      <textarea id="token" placeholder="Paste an Entra access token (eyJ...)" spellcheck="false"></textarea>
+      <input id="src" type="url" value="https://vibe.codetiq.io/" aria-label="SPA URL" />
+      <div class="controls">
+        <button id="load">Load iframe</button>
+        <button id="push" class="secondary" disabled>Push token (no reload)</button>
+      </div>
+    </header>
+    <pre id="log"></pre>
+    <div id="frame-wrap"></div>
+
+    <script>
+      const READY = "gsdb-host-ready";
+      const TOKEN = "gsdb-host-token";
+
+      const $ = (id) => document.getElementById(id);
+      const logEl = $("log");
+      let token = "";
+      let spaOrigin = "";
+      let frame = null;
+
+      function log(msg, warn) {
+        const line = document.createElement("div");
+        if (warn) line.className = "warn";
+        line.textContent = new Date().toLocaleTimeString() + "  " + msg;
+        logEl.appendChild(line);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      // Decoded only to show the user how long they have left -- the SPA and the backend
+      // are what actually validate this token.
+      function expiryOf(jwt) {
+        try {
+          const exp = JSON.parse(atob(jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))).exp;
+          return typeof exp === "number" ? new Date(exp * 1000) : null;
+        } catch {
+          return null;
+        }
+      }
+
+      function describeToken(jwt) {
+        const exp = expiryOf(jwt);
+        if (!exp) return "token accepted (could not read exp -- is it a JWT?)";
+        const mins = Math.round((exp.getTime() - Date.now()) / 60000);
+        return mins > 0
+          ? `token accepted, expires in ${mins} min (${exp.toLocaleTimeString()})`
+          : `token EXPIRED ${-mins} min ago (${exp.toLocaleTimeString()}) -- get a fresh one`;
+      }
+
+      // Always targeted at the SPA's exact origin, never "*": this message carries the
+      // access token, so it must not be readable by whatever else might occupy the frame.
+      function push() {
+        if (!frame || !token || !spaOrigin) return;
+        frame.contentWindow.postMessage({ type: TOKEN, token }, spaOrigin);
+        log("-> " + TOKEN + " posted to " + spaOrigin);
+      }
+
+      // Registered before the iframe is ever created, so the SPA's first ready ping (sent
+      // at load, before React renders) cannot arrive with nobody listening.
+      window.addEventListener("message", (e) => {
+        if (!frame || e.source !== frame.contentWindow) return;
+        if (e.data && e.data.type === READY) {
+          log("<- " + READY + " from " + e.origin);
+          if (token) push();
+          else log("   ...but no token pasted yet; paste one and press Push token", true);
+        }
+      });
+
+      $("load").addEventListener("click", () => {
+        token = $("token").value.trim();
+        const url = $("src").value.trim();
+        try {
+          spaOrigin = new URL(url).origin;
+        } catch {
+          log("that SPA URL does not parse", true);
+          return;
+        }
+        if (!token) log("no token pasted -- the SPA will show its own sign-in screen", true);
+        else log(describeToken(token), (expiryOf(token) || 0) && expiryOf(token) < new Date());
+
+        const wrap = $("frame-wrap");
+        wrap.textContent = "";
+        frame = document.createElement("iframe");
+        // Deliberately no sandbox attribute: the SPA needs same-origin storage, scripts and
+        // its own nested Appsmith iframe, which a default sandbox would all deny.
+        frame.src = url;
+        frame.title = "GS Data Backbone - Report Generator";
+        wrap.appendChild(frame);
+        $("push").disabled = false;
+        log("iframe -> " + url);
+      });
+
+      $("push").addEventListener("click", () => {
+        token = $("token").value.trim();
+        if (!token) {
+          log("nothing to push -- paste a token first", true);
+          return;
+        }
+        log(describeToken(token));
+        push();
+      });
+    </script>
+  </body>
+</html>
