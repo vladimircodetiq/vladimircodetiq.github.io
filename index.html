@@ -13,8 +13,16 @@
       SPA  -> host: ready                 loaded, wants a token
                     token-request {reason} what it holds is expiring -- send a fresh one
                     auth-required {reason} asked, nobody answered; only you can fix it
+                    navigation {path}      where the user just went
+                    resize {height}        its content height
       host -> SPA:  token {token}          replaces whatever it holds, no reload
                     token-unavailable      you cannot supply one right now
+                    navigate {path}        show this route, e.g. /preview/42
+
+  Note for a deployed SPA: it only accepts messages from the origins its build names
+  (VITE_HOST_ORIGINS, from extra_frame_ancestors in stages/config.py). Serving this page
+  from an origin that is not in that list gets you a frame that renders -- or not, since
+  the same list drives the frame-ancestors CSP -- and ignores everything you send it.
 
   The host may push a fresh token at any time; the SPA swaps it in without reloading. A
   token for a *different user* is not a renewal -- the SPA drops the previous user's
@@ -63,6 +71,13 @@
         border-radius: 6px;
         resize: vertical;
       }
+      input[type="text"] {
+        flex: 0 1 160px;
+        font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+        padding: 7px 9px;
+        border: 1px solid #d5d9df;
+        border-radius: 6px;
+      }
       input[type="url"] {
         flex: 0 1 260px;
         font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -107,6 +122,10 @@
         <button id="load">Load iframe</button>
         <button id="push" class="secondary" disabled>Push token (no reload)</button>
       </div>
+      <div class="controls">
+        <input id="path" type="text" value="/" aria-label="Route to ask the SPA for" />
+        <button id="go" class="secondary" disabled>Send navigate</button>
+      </div>
     </header>
     <pre id="log"></pre>
     <div id="frame-wrap"></div>
@@ -118,9 +137,12 @@
       const READY = "ready";
       const TOKEN_REQUEST = "token-request";
       const AUTH_REQUIRED = "auth-required";
+      const NAVIGATION = "navigation";
+      const RESIZE = "resize";
       // host -> SPA
       const TOKEN = "token";
       const TOKEN_UNAVAILABLE = "token-unavailable";
+      const NAVIGATE = "navigate";
 
       const $ = (id) => document.getElementById(id);
       const logEl = $("log");
@@ -196,6 +218,20 @@
           push();
           return;
         }
+        if (msg.type === NAVIGATION) {
+          // Where the SPA is now. A real host would put this in its own URL so a reload
+          // lands back on the same dashboard. Do NOT echo it back as `navigate`: the SPA
+          // suppresses the report for a route you asked for, but a blind echo of every
+          // other navigation would still fight the user.
+          log("<- " + NAVIGATION + " " + (msg.payload && msg.payload.path));
+          $("path").value = (msg.payload && msg.payload.path) || "/";
+          return;
+        }
+        if (msg.type === RESIZE) {
+          // A host that gives the frame a fixed height (as this page does) can ignore this.
+          log("<- " + RESIZE + " " + (msg.payload && msg.payload.height) + "px");
+          return;
+        }
         if (msg.type === AUTH_REQUIRED) {
           // The SPA asked, nobody answered in time. It is now showing "your session has
           // expired" and will not recover until a token arrives.
@@ -224,7 +260,17 @@
         frame.title = "GS Data Backbone - Report Generator";
         wrap.appendChild(frame);
         $("push").disabled = false;
+        $("go").disabled = false;
         log("iframe -> " + url);
+      });
+
+      $("go").addEventListener("click", () => {
+        const path = $("path").value.trim();
+        if (!path.startsWith("/")) {
+          log("navigate takes an in-app path, e.g. /preview/42", true);
+          return;
+        }
+        send(NAVIGATE, { path });
       });
 
       $("push").addEventListener("click", () => {
